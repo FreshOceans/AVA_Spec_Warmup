@@ -6,7 +6,7 @@
     <title>AVA Spec Warm Up Results</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
 </head>
-<body class="{% if capture_mode %}capture-mode{% endif %}">
+<body id="top" class="{% if capture_mode %}capture-mode{% endif %}">
     <header class="app-header">
         <div>
             <p class="eyebrow">Warm Up Metrics</p>
@@ -50,7 +50,7 @@
         {% endif %}
 
         {% if report and warmup %}
-        <section class="card">
+        <section class="card" id="results-performance-card">
             <div class="section-heading">
                 <div>
                     <h2>AVA Spec Warm Up Performance</h2>
@@ -134,30 +134,51 @@
             </ol>
         </section>
 
-        <section class="card attempts-card" data-live-attempts="true">
-            <div class="section-heading">
+        <details class="card attempts-card attempts-section" data-live-attempts="true" {% if not run_active %}open{% endif %}>
+            <summary class="section-heading attempts-section-summary">
                 <div>
                     <h2>Completed Attempts</h2>
                     <p>Attempts appear here as they finish, including success state, duration, errors, and stage timings.</p>
                 </div>
-            </div>
+                <span class="attempts-toggle-label"></span>
+            </summary>
             <div class="attempt-list" id="live-attempts-list">
                 {% set rendered_attempts = namespace(count=0) %}
                 {% if report %}
                     {% for scenario in report.scenario_results %}
                         {% for attempt in scenario.attempt_results %}
                             {% set rendered_attempts.count = rendered_attempts.count + 1 %}
-                            <article class="attempt-row {% if attempt.success %}ok{% elif attempt.timed_out %}warn{% else %}error{% endif %}">
-                                <div>
-                                    <strong>Attempt {{ attempt.attempt_number }}</strong>
+                            <details class="attempt-row {% if attempt.success %}ok{% elif attempt.timed_out %}warn{% else %}error{% endif %}">
+                                <summary>
+                                    <span><strong>Attempt {{ attempt.attempt_number }}</strong></span>
                                     <span class="pill">{% if attempt.success %}success{% elif attempt.timed_out %}timeout{% elif attempt.skipped %}skipped{% else %}failure{% endif %}</span>
-                                </div>
+                                    <span>{{ '%.3fs'|format(attempt.duration_seconds or 0) }}</span>
+                                </summary>
                                 <p>{{ attempt.explanation }}</p>
                                 {% if attempt.error %}<p class="attempt-error">{{ attempt.error }}</p>{% endif %}
                                 <dl>
                                     <div><dt>Duration</dt><dd>{{ '%.3fs'|format(attempt.duration_seconds or 0) }}</dd></div>
                                     <div><dt>Messages</dt><dd>{{ attempt.conversation|length }}</dd></div>
                                 </dl>
+                                <section class="conversation-snapshot">
+                                    <h3>Web Messenger Interaction Snapshot</h3>
+                                    {% if attempt.conversation %}
+                                    <ol>
+                                        {% for message in attempt.conversation %}
+                                        {% set role_text = message.role.value if message.role.value is defined else message.role %}
+                                        <li class="conversation-message {{ role_text }}">
+                                            <span class="conversation-meta">
+                                                <strong>{{ role_text }}</strong>
+                                                <time>{{ message.timestamp or '-' }}</time>
+                                            </span>
+                                            <p>{{ message.content }}</p>
+                                        </li>
+                                        {% endfor %}
+                                    </ol>
+                                    {% else %}
+                                    <p class="empty">No Web Messenger transcript was captured for this attempt.</p>
+                                    {% endif %}
+                                </section>
                                 {% if attempt.warmup_stage_durations_ms %}
                                 <details>
                                     <summary>Stage timings</summary>
@@ -168,7 +189,7 @@
                                     </ul>
                                 </details>
                                 {% endif %}
-                            </article>
+                            </details>
                         {% endfor %}
                     {% endfor %}
                 {% endif %}
@@ -176,7 +197,7 @@
                     <p class="empty">No completed attempts yet.</p>
                 {% endif %}
             </div>
-        </section>
+        </details>
 
         <section class="card">
             <h2>Latency Percentiles</h2>
@@ -323,6 +344,7 @@
             {% endif %}
         </section>
     </main>
+    <a href="#top" class="back-to-top capture-hidden" aria-label="Scroll back to top">Back to Top</a>
     <script src="{{ url_for('static', filename='js/warmup.js') }}"></script>
 </body>
 </html>

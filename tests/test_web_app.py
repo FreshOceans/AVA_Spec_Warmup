@@ -159,7 +159,34 @@ def test_run_model_warm_up_json_completes_and_persists_history(client):
     assert "AVA Spec Warm Up Performance" in results_body
     assert "Performance, schedule, and local history for AVA Spec Warm Up runs." in results_body
     assert "Completed Attempts" in results_body
+    assert "<details class=\"card attempts-card attempts-section\" data-live-attempts=\"true\" open>" in results_body
+    assert "<details class=\"attempt-row ok\">" in results_body
     assert "Attempt 1" in results_body
+    assert "Web Messenger Interaction Snapshot" in results_body
+    assert "Welcome" in results_body
+    assert MODEL_WARMUP_FIXED_MESSAGE in results_body
+    assert "Back to Top" in results_body
+
+
+def test_completed_attempts_section_collapses_while_run_active(app, client):
+    emitter = ProgressEmitter()
+    run_request = ModelWarmUpRunRequest(
+        deployment_id="deploy-123",
+        region="usw2.pure.cloud",
+        attempt_count=2,
+    )
+    with app.config["run_state_lock"]:
+        app.config["run_active"] = True
+        app.config["active_run_id"] = "run-123"
+        app.config["active_run_type"] = "model_warm_up"
+        app.config["progress_emitter"] = emitter
+        app.config["active_model_warmup_metadata"] = build_model_warmup_metadata(run_request)
+
+    results_body = client.get("/results").get_data(as_text=True)
+
+    assert "class=\"card attempts-card attempts-section\"" in results_body
+    assert "data-live-attempts=\"true\"" in results_body
+    assert "<details class=\"card attempts-card attempts-section\" data-live-attempts=\"true\" open>" not in results_body
 
 
 def test_run_model_warm_up_validation_error(client):
@@ -236,10 +263,10 @@ def test_results_export_png_uses_dashboard_capture(app, client):
         },
     )
     _wait_until_idle(client)
-    captured_urls = []
+    captured_calls = []
 
-    def fake_capture(url):
-        captured_urls.append(url)
+    def fake_capture(url, selector):
+        captured_calls.append((url, selector))
         return b"\x89PNG\r\n\x1a\nfake"
 
     app.config["results_png_capture"] = fake_capture
@@ -249,8 +276,9 @@ def test_results_export_png_uses_dashboard_capture(app, client):
     assert png_response.status_code == 200
     assert png_response.headers["Content-Type"] == "image/png"
     assert png_response.data.startswith(b"\x89PNG")
-    assert captured_urls
-    assert "screenshot=1" in captured_urls[0]
+    assert captured_calls
+    assert "screenshot=1" in captured_calls[0][0]
+    assert captured_calls[0][1] == "#results-performance-card"
 
 
 def test_run_status_derives_live_progress_snapshot(app, client):

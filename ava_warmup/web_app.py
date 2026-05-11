@@ -410,7 +410,10 @@ def create_app(config: Optional[AppConfig] = None) -> Flask:
             for item in _failure_summaries(report, limit=3)
         )
 
-    def _capture_results_dashboard_png(capture_url: str) -> bytes:
+    def _capture_results_dashboard_png(
+        capture_url: str,
+        target_selector: str = "#results-performance-card",
+    ) -> bytes:
         try:
             from playwright.sync_api import sync_playwright
         except ImportError as exc:
@@ -424,7 +427,9 @@ def create_app(config: Optional[AppConfig] = None) -> Flask:
                 page = browser.new_page(viewport={"width": 1280, "height": 1600})
                 page.goto(capture_url, wait_until="networkidle", timeout=30000)
                 page.emulate_media(media="screen")
-                return page.screenshot(full_page=True, type="png")
+                target = page.locator(target_selector).first
+                target.wait_for(state="visible", timeout=10000)
+                return target.screenshot(type="png")
             finally:
                 browser.close()
 
@@ -1071,7 +1076,10 @@ def create_app(config: Optional[AppConfig] = None) -> Flask:
                     "results_png_capture",
                     _capture_results_dashboard_png,
                 )
-                png_data = capture_func(_capture_results_url(history_run_id))
+                png_data = capture_func(
+                    _capture_results_url(history_run_id),
+                    "#results-performance-card",
+                )
             except Exception as exc:
                 return jsonify({"error": f"Unable to export PNG: {exc}"}), 503
             return send_file(

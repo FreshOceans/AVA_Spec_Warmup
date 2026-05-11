@@ -136,6 +136,34 @@
             + "</ul></details>";
     }
 
+    function messageRole(message) {
+        if (!message || message.role === null || message.role === undefined) {
+            return "message";
+        }
+        if (typeof message.role === "object" && message.role.value) {
+            return String(message.role.value);
+        }
+        return String(message.role);
+    }
+
+    function renderConversationSnapshot(conversation) {
+        var messages = conversation || [];
+        if (!messages.length) {
+            return '<section class="conversation-snapshot"><h3>Web Messenger Interaction Snapshot</h3>'
+                + '<p class="empty">No Web Messenger transcript was captured for this attempt.</p></section>';
+        }
+        return '<section class="conversation-snapshot"><h3>Web Messenger Interaction Snapshot</h3><ol>'
+            + messages.map(function (message) {
+                var role = messageRole(message);
+                return '<li class="conversation-message ' + escapeHtml(role) + '">'
+                    + '<span class="conversation-meta"><strong>' + escapeHtml(role) + '</strong>'
+                    + '<time>' + escapeHtml(message.timestamp || "-") + '</time></span>'
+                    + '<p>' + escapeHtml(message.content || "") + '</p>'
+                    + '</li>';
+            }).join("")
+            + '</ol></section>';
+    }
+
     function renderAttempts(events) {
         var container = byId("live-attempts-list");
         if (!container) {
@@ -159,15 +187,17 @@
             var error = attempt.error
                 ? '<p class="attempt-error">' + escapeHtml(attempt.error) + "</p>"
                 : "";
-            return '<article class="attempt-row ' + rowClass + '">'
-                + "<div><strong>Attempt " + escapeHtml(attempt.attempt_number || "") + "</strong> "
-                + '<span class="pill">' + escapeHtml(status) + "</span></div>"
+            return '<details class="attempt-row ' + rowClass + '">'
+                + "<summary><span><strong>Attempt " + escapeHtml(attempt.attempt_number || "") + "</strong></span> "
+                + '<span class="pill">' + escapeHtml(status) + "</span>"
+                + "<span>" + duration + "s</span></summary>"
                 + "<p>" + escapeHtml(attempt.explanation || "") + "</p>"
                 + error
                 + "<dl><div><dt>Duration</dt><dd>" + duration + "s</dd></div>"
                 + "<div><dt>Messages</dt><dd>" + messageCount + "</dd></div></dl>"
+                + renderConversationSnapshot(attempt.conversation)
                 + renderStageTimings(attempt.warmup_stage_durations_ms)
-                + "</article>";
+                + "</details>";
         }).join("");
     }
 

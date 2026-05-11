@@ -36,6 +36,7 @@ body {
     background: var(--bg);
     color: var(--text);
     font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    scroll-behavior: smooth;
 }
 
 a {
@@ -328,12 +329,61 @@ button:disabled {
     gap: 0.85rem;
 }
 
+.attempts-section-summary {
+    margin-bottom: 0;
+    cursor: pointer;
+    list-style: none;
+}
+
+.attempts-section-summary::-webkit-details-marker {
+    display: none;
+}
+
+.attempts-section[open] .attempts-section-summary {
+    margin-bottom: 1rem;
+}
+
+.attempts-toggle-label::before {
+    content: "Expand";
+    color: var(--accent-strong);
+    font-size: 0.9rem;
+    font-weight: 800;
+}
+
+.attempts-section[open] .attempts-toggle-label::before {
+    content: "Collapse";
+}
+
 .attempt-row {
     padding: 1rem;
     border: 1px solid var(--line);
     border-left-width: 4px;
     border-radius: 14px;
     background: color-mix(in srgb, var(--bg) 55%, var(--card));
+}
+
+.attempt-row summary {
+    display: flex;
+    gap: 0.6rem;
+    align-items: center;
+    justify-content: space-between;
+    cursor: pointer;
+    list-style: none;
+}
+
+.attempt-row summary::-webkit-details-marker {
+    display: none;
+}
+
+.attempt-row summary::after {
+    content: "Expand";
+    color: var(--accent-strong);
+    font-size: 0.85rem;
+    font-weight: 700;
+}
+
+.attempt-row[open] summary::after {
+    content: "Collapse";
 }
 
 .attempt-row.ok {
@@ -346,12 +396,6 @@ button:disabled {
 
 .attempt-row.error {
     border-left-color: var(--danger);
-}
-
-.attempt-row > div:first-child {
-    display: flex;
-    gap: 0.6rem;
-    align-items: center;
 }
 
 .attempt-row p {
@@ -389,6 +433,69 @@ button:disabled {
 .attempt-row ul {
     margin: 0.5rem 0 0;
     padding-left: 1.25rem;
+}
+
+.conversation-snapshot {
+    margin-top: 1rem;
+}
+
+.conversation-snapshot h3 {
+    margin: 0 0 0.75rem;
+    font-size: 1rem;
+}
+
+.conversation-snapshot ol {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.conversation-message {
+    max-width: 78%;
+    padding: 0.75rem;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: var(--card);
+}
+
+.conversation-message.user {
+    align-self: flex-end;
+    background: color-mix(in srgb, var(--accent) 16%, var(--card));
+}
+
+.conversation-message.agent {
+    align-self: flex-start;
+}
+
+.conversation-meta {
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+    color: var(--muted);
+    font-size: 0.78rem;
+    text-transform: uppercase;
+}
+
+.conversation-meta time {
+    text-transform: none;
+}
+
+.back-to-top {
+    position: fixed;
+    right: 1rem;
+    bottom: 1rem;
+    z-index: 20;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 0.7rem 0.95rem;
+    background: var(--card);
+    box-shadow: 0 10px 30px rgba(15, 23, 42, 0.16);
+    color: var(--accent-strong);
+    font-weight: 800;
+    text-decoration: none;
 }
 
 .notice.error {
