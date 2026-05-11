@@ -1,0 +1,328 @@
+"""Genesys Cloud Web Messaging Guest API client."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import re
+import uuid
+from typing import Any, Optional
+
+import websockets
+
+
+class WebMessagingError(Exception):
+    """Raised when Web Messaging connection or protocol handling fails."""
+
+
+class WebMessagingClient:
+    """Minimal Web Messaging client used by AVA Spec Warm Up attempts."""
+
+    _UUID_PATTERN = re.compile(
+        r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-"
+        r"[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+    )
+
+    def __init__(
+        self,
+        region: str,
+        deployment_id: str,
+        timeout: int = 90,
+        origin: str = "https://apps.mypurecloud.com",
+        debug_capture_frames: bool = False,
+        debug_capture_frame_limit: int = 8,
+    ):
+        self.region = region
+        self.deployment_id = deployment_id
+        self.timeout = timeout
+        self.origin = origin
+        self._ws: Optional[websockets.WebSocketClientProtocol] = None
+        self._token: Optional[str] = None
+        self.conversation_id: Optional[str] = None
+        self.participant_id: Optional[str] = None
+        self._conversation_id_candidates: list[str] = []
+        self._debug_capture_frames = debug_capture_frames
+        self._debug_capture_frame_limit = max(1, debug_capture_frame_limit)
+        self._debug_frames: list[dict[str, Any]] = []
+
+    @property
+    def ws_url(self) -> str:
+        return f"wss://webmessaging.{self.region}/v1?deploymentId={self.deployment_id}"
+
+    async def connect(self) -> None:
+        """Connect and configure a Web Messaging guest session."""
+
+        try:
+            self._ws = await websockets.connect(
+                self.ws_url,
+                additional_headers={"Origin": self.origin},
+            )
+        except TypeError:
+            self._ws = await websockets.connect(
+                self.ws_url,
+                extra_headers={"Origin": self.origin},
+            )
+        except Exception as exc:
+            raise WebMessagingError(
+                "Failed to connect to Web Messaging API: "
+                f"deployment_id={self.deployment_id}, region={self.region}. Error: {exc}"
+            ) from exc
+
+        self._token = str(uuid.uuid4())
+        configure_message = {
+            "action": "configureSession",
+            "deploymentId": self.deployment_id,
+            "token": self._token,
+        }
+        try:
+            await self._ws.send(json.dumps(configure_message))
+        except Exception as exc:
+            raise WebMessagingError(
+                "Failed to configure session: "
+                f"deployment_id={self.deployment_id}, region={self.region}. Error: {exc}"
+            ) from exc
+
+        try:
+            deadline = asyncio.get_event_loop().time() + self.timeout
+            while True:
+                remaining = deadline - asyncio.get_event_loop().time()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError()
+                response = await asyncio.wait_for(self._ws.recv(), timeout=remaining)
+                try:
+                    data = json.loads(response)
+                except json.JSONDecodeError:
+                    continue
+                self._update_conversation_metadata(data)
+                self._capture_debug_frame(data, stage="connect")
+                if data.get("type") == "SessionResponse" or self._is_session_ready_fallback(data):
+                    break
+        except asyncio.TimeoutError as exc:
+            raise WebMessagingError(
+                "Timed out waiting for session confirmation: "
+                f"deployment_id={self.deployment_id}, region={self.region}"
+            ) from exc
+        except Exception as exc:
+            raise WebMessagingError(
+                "Error during session setup: "
+                f"deployment_id={self.deployment_id}, region={self.region}. Error: {exc}"
+            ) from exc
+
+    def _is_session_ready_fallback(self, payload: object) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        msg_type = payload.get("type")
+        if msg_type == "error":
+            return False
+        return msg_type in {"message", "response"}
+
+    async def wait_for_welcome(self) -> str:
+        if self._ws is None:
+            raise WebMessagingError(
+                f"Not connected: deployment_id={self.deployment_id}, region={self.region}"
+            )
+        try:
+            return await self._receive_agent_message()
+        except asyncio.TimeoutError as exc:
+            raise TimeoutError(
+                f"Timed out waiting for welcome message after {self.timeout}s"
+            ) from exc
+
+    async def send_join(self) -> None:
+        if self._ws is None:
+            raise WebMessagingError(
+                f"Not connected: deployment_id={self.deployment_id}, region={self.region}"
+            )
+        join_message = {
+            "action": "onMessage",
+            "token": self._token,
+            "message": {
+                "type": "Event",
+                "events": [
+                    {
+                        "eventType": "Presence",
+                        "presence": {"type": "Join"},
+                    }
+                ],
+            },
+        }
+        try:
+            await self._ws.send(json.dumps(join_message))
+        except Exception as exc:
+            raise WebMessagingError(
+                f"Failed to send join event: deployment_id={self.deployment_id}, "
+                f"region={self.region}. Error: {exc}"
+            ) from exc
+
+    async def send_message(self, text: str) -> None:
+        if self._ws is None:
+            raise WebMessagingError(
+                f"Not connected: deployment_id={self.deployment_id}, region={self.region}"
+            )
+        message = {
+            "action": "onMessage",
+            "token": self._token,
+            "message": {
+                "type": "Text",
+                "text": text,
+            },
+        }
+        try:
+            await self._ws.send(json.dumps(message))
+        except Exception as exc:
+            raise WebMessagingError(
+                f"Failed to send message: deployment_id={self.deployment_id}, "
+                f"region={self.region}. Error: {exc}"
+            ) from exc
+
+    async def receive_response(self) -> str:
+        if self._ws is None:
+            raise WebMessagingError(
+                f"Not connected: deployment_id={self.deployment_id}, region={self.region}"
+            )
+        try:
+            return await self._receive_agent_message()
+        except asyncio.TimeoutError as exc:
+            raise TimeoutError(
+                f"Timed out waiting for agent response after {self.timeout}s"
+            ) from exc
+
+    async def disconnect(self) -> None:
+        if self._ws is not None:
+            try:
+                await self._ws.close()
+            except Exception:
+                pass
+            finally:
+                self._ws = None
+                self._token = None
+                self.conversation_id = None
+                self.participant_id = None
+                self._conversation_id_candidates = []
+                self._debug_frames = []
+
+    async def _receive_agent_message(self) -> str:
+        deadline = asyncio.get_event_loop().time() + self.timeout
+        while True:
+            remaining = deadline - asyncio.get_event_loop().time()
+            if remaining <= 0:
+                raise asyncio.TimeoutError()
+            raw = await asyncio.wait_for(self._ws.recv(), timeout=remaining)
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+
+            self._update_conversation_metadata(data)
+            self._capture_debug_frame(data, stage="receive")
+            msg_type = data.get("type", "")
+            msg_class = data.get("class", "")
+            body = data.get("body", {})
+
+            if isinstance(body, dict):
+                if body.get("direction", "") == "Inbound":
+                    continue
+                if body.get("type", "") == "Event":
+                    continue
+
+            if msg_type == "message" and msg_class == "StructuredMessage" and isinstance(body, dict):
+                text = body.get("text", "")
+                if text:
+                    return text
+            if msg_type == "message":
+                if isinstance(body, str) and body:
+                    return body
+                if isinstance(body, dict) and body.get("text"):
+                    return str(body["text"])
+            if msg_type == "response":
+                if isinstance(body, dict) and body.get("text"):
+                    return str(body["text"])
+                if isinstance(body, str) and body:
+                    return body
+
+    def _update_conversation_metadata(self, payload: object) -> None:
+        if not isinstance(payload, dict):
+            return
+
+        def _set_if_missing(attr_name: str, value: object) -> None:
+            if getattr(self, attr_name) is not None:
+                return
+            if isinstance(value, str) and value.strip():
+                normalized = value.strip()
+                if attr_name == "conversation_id" and not self._is_likely_conversation_id(normalized):
+                    return
+                setattr(self, attr_name, normalized)
+
+        def _walk(node: object, parent_key: Optional[str] = None) -> None:
+            if isinstance(node, dict):
+                _set_if_missing("conversation_id", node.get("conversationId"))
+                _set_if_missing("conversation_id", node.get("conversation_id"))
+                _set_if_missing("participant_id", node.get("participantId"))
+                _set_if_missing("participant_id", node.get("participant_id"))
+                self._capture_conversation_id_candidate(node.get("conversationId"), is_explicit=True)
+                self._capture_conversation_id_candidate(node.get("conversation_id"), is_explicit=True)
+                conversation_obj = node.get("conversation")
+                if isinstance(conversation_obj, dict):
+                    _set_if_missing("conversation_id", conversation_obj.get("id"))
+                    self._capture_conversation_id_candidate(conversation_obj.get("id"), is_explicit=True)
+                participant_obj = node.get("participant")
+                if isinstance(participant_obj, dict):
+                    _set_if_missing("participant_id", participant_obj.get("id"))
+                if parent_key == "conversation":
+                    _set_if_missing("conversation_id", node.get("id"))
+                if parent_key == "participant":
+                    _set_if_missing("participant_id", node.get("id"))
+                for key, value in node.items():
+                    _walk(value, parent_key=key)
+            elif isinstance(node, list):
+                for item in node:
+                    _walk(item, parent_key=parent_key)
+
+        _walk(payload)
+        if self.conversation_id:
+            self._add_conversation_id_candidate(self.conversation_id)
+
+    def _capture_conversation_id_candidate(self, value: object, is_explicit: bool = False) -> None:
+        if not isinstance(value, str) or not is_explicit:
+            return
+        normalized = value.strip()
+        if not normalized:
+            return
+        self._add_conversation_id_candidate(normalized)
+        if self.conversation_id is None and self._is_likely_conversation_id(normalized):
+            self.conversation_id = normalized
+
+    def _add_conversation_id_candidate(self, value: str) -> None:
+        if value not in self._conversation_id_candidates:
+            self._conversation_id_candidates.append(value)
+
+    def _is_likely_conversation_id(self, value: str) -> bool:
+        return bool(self._UUID_PATTERN.match(value))
+
+    def _capture_debug_frame(self, payload: object, stage: str) -> None:
+        if (
+            not self._debug_capture_frames
+            or len(self._debug_frames) >= self._debug_capture_frame_limit
+            or not isinstance(payload, dict)
+        ):
+            return
+        body = payload.get("body")
+        self._debug_frames.append(
+            {
+                "stage": stage,
+                "type": payload.get("type"),
+                "class": payload.get("class"),
+                "top_level_keys": sorted(payload.keys()),
+                "body_type": body.get("type") if isinstance(body, dict) else None,
+                "body_direction": body.get("direction") if isinstance(body, dict) else None,
+                "conversation_id": self.conversation_id,
+                "participant_id": self.participant_id,
+                "conversation_id_candidates": list(self._conversation_id_candidates),
+            }
+        )
+
+    def get_debug_frames(self) -> list[dict[str, Any]]:
+        return [dict(frame) for frame in self._debug_frames]
+
+    def get_conversation_id_candidates(self) -> list[str]:
+        return list(self._conversation_id_candidates)

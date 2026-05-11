@@ -1,0 +1,353 @@
+"""Focused Flask route tests for the standalone warm-up app."""
+
+from datetime import datetime, timezone
+import time
+
+import pytest
+
+from ava_warmup.progress import ProgressEmitter
+from ava_warmup.runner import (
+    MODEL_WARMUP_FIXED_MESSAGE,
+    MODEL_WARMUP_SCENARIO_NAME,
+    MODEL_WARMUP_SUITE_NAME,
+    ModelWarmUpRunRequest,
+    build_model_warmup_metadata,
+)
+from ava_warmup.schemas import (
+    AppConfig,
+    AttemptResult,
+    Message,
+    MessageRole,
+    ProgressEvent,
+    ProgressEventType,
+    ScenarioResult,
+    TestReport as WarmupTestReport,
+)
+from ava_warmup.web_app import create_app
+
+
+class _FakeWarmUpRunner:
+    def __init__(self, *, config: AppConfig, progress_emitter: ProgressEmitter, stop_event=None):
+        self.config = config
+        self.progress_emitter = progress_emitter
+        self.stop_event = stop_event
+
+    async def run(self, request: ModelWarmUpRunRequest) -> WarmupTestReport:
+        attempts = []
+        for attempt_number in range(1, request.attempt_count + 1):
+            attempts.append(
+                AttemptResult(
+                    attempt_number=attempt_number,
+                    success=True,
+                    conversation=[
+                        Message(role=MessageRole.AGENT, content="Welcome", timestamp=datetime.now(timezone.utc)),
+                        Message(role=MessageRole.USER, content=MODEL_WARMUP_FIXED_MESSAGE, timestamp=datetime.now(timezone.utc)),
+                        Message(role=MessageRole.AGENT, content="Goodbye", timestamp=datetime.now(timezone.utc)),
+                    ],
+                    explanation="AVA Spec Warm Up completed; no judgement performed.",
+                    started_at=datetime.now(timezone.utc),
+                    completed_at=datetime.now(timezone.utc),
+                    duration_seconds=0.01,
+                    warmup_stage_durations_ms={
+                        "connect": 1.0,
+                        "welcome_wait": 2.0,
+                        "agent_response_wait": 3.0,
+                        "disconnect": 1.0,
+                    },
+                )
+            )
+        scenario = ScenarioResult(
+            scenario_name=MODEL_WARMUP_SCENARIO_NAME,
+            attempts=len(attempts),
+            successes=len(attempts),
+            failures=0,
+            timeouts=0,
+            skipped=0,
+            success_rate=1.0,
+            is_regression=False,
+            attempt_results=attempts,
+        )
+        return WarmupTestReport(
+            suite_name=MODEL_WARMUP_SUITE_NAME,
+            timestamp=datetime.now(timezone.utc),
+            duration_seconds=0.05,
+            scenario_results=[scenario],
+            overall_attempts=len(attempts),
+            overall_successes=len(attempts),
+            overall_failures=0,
+            overall_timeouts=0,
+            overall_skipped=0,
+            overall_success_rate=1.0,
+            model_warmup_run=build_model_warmup_metadata(
+                request,
+                completed_attempts=len(attempts),
+                attempts_per_second=20.0,
+                duration_percentiles={"p50": 0.01, "p95": 0.01, "p99": 0.01},
+                stage_duration_percentiles={
+                    "connect": {"p50": 1.0, "p95": 1.0, "p99": 1.0},
+                    "agent_response_wait": {"p50": 3.0, "p95": 3.0, "p99": 3.0},
+                },
+            ),
+            has_regressions=False,
+            regression_threshold=self.config.success_threshold,
+        )
+
+
+@pytest.fixture
+def app(tmp_path, monkeypatch):
+    monkeypatch.setattr("ava_warmup.web_app.ModelWarmUpRunner", _FakeWarmUpRunner)
+    return create_app(
+        AppConfig(
+            history_dir=str(tmp_path),
+            history_max_runs=10,
+            history_full_json_runs=10,
+            history_gzip_runs=0,
+        )
+    )
+
+
+@pytest.fixture
+def client(app):
+    return app.test_client()
+
+
+def _wait_until_idle(client, timeout=2.0):
+    deadline = time.monotonic() + timeout
+    last_status = None
+    while time.monotonic() < deadline:
+        last_status = client.get("/run/status").get_json()
+        if not last_status["run_active"]:
+            return last_status
+        time.sleep(0.02)
+    raise AssertionError(f"run did not finish: {last_status}")
+
+
+def test_home_renders_warmup_only_form(client):
+    response = client.get("/")
+
+    assert response.status_code == 200
+    body = response.get_data(as_text=True)
+    assert "AVA Spec Warm Up" in body
+    assert "Suite Builder" not in body
+    assert "Transcript" not in body
+
+
+def test_run_model_warm_up_json_completes_and_persists_history(client):
+    response = client.post(
+        "/run/model_warm_up",
+        json={
+            "deployment_id": "deploy-123",
+            "region": "usw2.pure.cloud",
+            "attempt_count": 2,
+            "execution_mode": "serial",
+            "pacing_seconds": 1.0,
+        },
+    )
+    assert response.status_code == 202
+    assert response.get_json()["ok"] is True
+
+    _wait_until_idle(client)
+
+    history = client.get("/results/history").get_json()["runs"]
+    assert len(history) == 1
+    assert history[0]["run_type"] == "model_warm_up"
+    assert history[0]["model_warmup_run"]["completed_attempts"] == 2
+
+    results = client.get("/results")
+    assert results.status_code == 200
+    results_body = results.get_data(as_text=True)
+    assert "AVA Spec Warm Up Performance" in results_body
+    assert "Performance, schedule, and local history for AVA Spec Warm Up runs." in results_body
+    assert "Completed Attempts" in results_body
+    assert "Attempt 1" in results_body
+
+
+def test_run_model_warm_up_validation_error(client):
+    response = client.post("/run/model_warm_up", json={"deployment_id": ""})
+
+    assert response.status_code == 400
+    errors = response.get_json()["errors"]
+    assert "Deployment ID is required for AVA Spec Warm Up." in errors
+    assert "Region is required for AVA Spec Warm Up." in errors
+
+
+def test_schedule_save_status_and_cancel(client):
+    response = client.post(
+        "/run/model_warm_up/schedule",
+        json={
+            "deployment_id": "deploy-123",
+            "region": "usw2.pure.cloud",
+            "attempt_count": 3,
+            "execution_mode": "serial",
+            "pacing_seconds": 1.0,
+            "cadence": "daily",
+            "timezone_name": "UTC",
+            "time_hhmm": "02:00",
+            "start_date": "2099-04-27",
+            "end_date": "2099-04-30",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["ok"] is True
+    assert payload["schedule"]["enabled"] is True
+
+    status = client.get("/run/model_warm_up/schedule/status").get_json()
+    assert status["scheduled_warmups"][0]["run_request"]["attempt_count"] == 3
+
+    cancel = client.post("/run/model_warm_up/schedule/cancel", json={})
+    assert cancel.status_code == 200
+    assert cancel.get_json()["schedule"]["enabled"] is False
+
+
+def test_results_export_json_and_csv(client):
+    client.post(
+        "/run/model_warm_up",
+        json={
+            "deployment_id": "deploy-123",
+            "region": "usw2.pure.cloud",
+            "attempt_count": 1,
+            "execution_mode": "serial",
+            "pacing_seconds": 1.0,
+        },
+    )
+    _wait_until_idle(client)
+
+    json_response = client.get("/results/export?format=json")
+    assert json_response.status_code == 200
+    assert json_response.get_json()["model_warmup_run"]["completed_attempts"] == 1
+
+    csv_response = client.get("/results/export?format=csv")
+    assert csv_response.status_code == 200
+    assert "text/csv" in csv_response.headers["Content-Type"]
+    assert "attempts_per_second" in csv_response.get_data(as_text=True)
+
+
+def test_results_export_png_uses_dashboard_capture(app, client):
+    client.post(
+        "/run/model_warm_up",
+        json={
+            "deployment_id": "deploy-123",
+            "region": "usw2.pure.cloud",
+            "attempt_count": 1,
+            "execution_mode": "serial",
+            "pacing_seconds": 1.0,
+        },
+    )
+    _wait_until_idle(client)
+    captured_urls = []
+
+    def fake_capture(url):
+        captured_urls.append(url)
+        return b"\x89PNG\r\n\x1a\nfake"
+
+    app.config["results_png_capture"] = fake_capture
+
+    png_response = client.get("/results/export?format=png")
+
+    assert png_response.status_code == 200
+    assert png_response.headers["Content-Type"] == "image/png"
+    assert png_response.data.startswith(b"\x89PNG")
+    assert captured_urls
+    assert "screenshot=1" in captured_urls[0]
+
+
+def test_run_status_derives_live_progress_snapshot(app, client):
+    emitter = ProgressEmitter()
+    run_request = ModelWarmUpRunRequest(
+        deployment_id="deploy-123",
+        region="usw2.pure.cloud",
+        attempt_count=4,
+    )
+    emitter.emit(
+        ProgressEvent(
+            event_type=ProgressEventType.SUITE_STARTED,
+            suite_name=MODEL_WARMUP_SUITE_NAME,
+            message="Starting suite",
+            planned_attempts=4,
+            completed_attempts=0,
+        )
+    )
+    emitter.emit(
+        ProgressEvent(
+            event_type=ProgressEventType.ATTEMPT_COMPLETED,
+            suite_name=MODEL_WARMUP_SUITE_NAME,
+            scenario_name=MODEL_WARMUP_SCENARIO_NAME,
+            attempt_number=2,
+            success=True,
+            message="Attempt 2: success (2/4)",
+            planned_attempts=4,
+            completed_attempts=2,
+        )
+    )
+    with app.config["run_state_lock"]:
+        app.config["run_active"] = True
+        app.config["active_run_id"] = "run-123"
+        app.config["active_run_type"] = "model_warm_up"
+        app.config["progress_emitter"] = emitter
+        app.config["active_model_warmup_metadata"] = build_model_warmup_metadata(run_request)
+
+    payload = client.get("/run/status").get_json()
+    results_body = client.get("/results").get_data(as_text=True)
+
+    assert payload["model_warmup_run"]["completed_attempts"] == 2
+    assert payload["live_progress"]["planned_attempts"] == 4
+    assert payload["live_progress"]["completed_attempts"] == 2
+    assert payload["live_progress"]["remaining_attempts"] == 2
+    assert payload["live_progress"]["percent_complete"] == 50.0
+    assert payload["live_progress"]["estimated_remaining_seconds"] is not None
+    assert "Diagnostics Live View" in results_body
+    assert "Starting suite" in results_body
+
+
+def test_results_show_failure_diagnostics_and_csv_summary(app, client):
+    failed_attempt = AttemptResult(
+        attempt_number=1,
+        success=False,
+        conversation=[],
+        explanation="AVA Spec Warm Up attempt failed due to Web Messaging error.",
+        error="Failed to connect to Web Messaging API: connecting through a SOCKS proxy requires python-socks",
+        started_at=datetime.now(timezone.utc),
+        completed_at=datetime.now(timezone.utc),
+        duration_seconds=0.01,
+    )
+    scenario = ScenarioResult(
+        scenario_name=MODEL_WARMUP_SCENARIO_NAME,
+        attempts=1,
+        successes=0,
+        failures=1,
+        timeouts=0,
+        skipped=0,
+        success_rate=0.0,
+        is_regression=True,
+        attempt_results=[failed_attempt],
+    )
+    run_request = ModelWarmUpRunRequest(
+        deployment_id="deploy-123",
+        region="usw2.pure.cloud",
+        attempt_count=1,
+    )
+    app.config["latest_report"] = WarmupTestReport(
+        suite_name=MODEL_WARMUP_SUITE_NAME,
+        timestamp=datetime.now(timezone.utc),
+        duration_seconds=0.01,
+        scenario_results=[scenario],
+        overall_attempts=1,
+        overall_successes=0,
+        overall_failures=1,
+        overall_timeouts=0,
+        overall_skipped=0,
+        overall_success_rate=0.0,
+        model_warmup_run=build_model_warmup_metadata(run_request, completed_attempts=1),
+        has_regressions=True,
+        regression_threshold=app.config["app_config"].success_threshold,
+    )
+
+    results_body = client.get("/results").get_data(as_text=True)
+    csv_body = client.get("/results/export?format=csv").get_data(as_text=True)
+
+    assert "Failure Diagnostics" in results_body
+    assert "python-socks" in results_body
+    assert "failure_summary" in csv_body
+    assert "python-socks" in csv_body
