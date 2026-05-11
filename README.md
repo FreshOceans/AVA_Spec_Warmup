@@ -80,7 +80,7 @@ After a run starts, the `Results` page shows live progress and polls `/run/statu
 
 ## Designing Custom Warm-Up Suites
 
-Custom warm-up suites are JSON files saved in the repository’s `warmup_suites/` directory. The filename becomes the selectable suite id, so `warmup_suites/custom_support.json` is selected with `suite_id=custom_support` in the API.
+Custom warm-up suites are JSON files saved in the repository’s `warmup_suites/` directory. The filename becomes the selectable suite id, so `warmup_suites/custom_support.json` is selected with `suite_id=custom_support` in the API. The Run page loads this directory whenever it renders, lists valid suites in the `Warm-Up Suite` selector, and shows validation errors for malformed suite files without blocking valid suites.
 
 Each file uses this structure:
 
@@ -101,7 +101,7 @@ Fields:
 - `scenario_name`: scenario name shown in reports and progress events.
 - `messages`: ordered list of non-empty user messages sent during each attempt.
 
-The checked-in `warmup_suites/ava_spec_default.json` mirrors the built-in default, and `warmup_suites/example_custom.json` shows a simple two-message custom routine. Custom schedules persist the full selected suite spec, so a saved schedule keeps using the same message sequence even if the source JSON file later changes.
+The checked-in `warmup_suites/ava_spec_default.json` mirrors the built-in default, and `warmup_suites/example_custom.json` shows a simple two-message custom routine. Each attempt sends every message in the selected suite in order and captures the Web Messenger interaction snapshot in results. Custom schedules persist the full selected suite spec, so a saved schedule keeps using the same suite name, scenario name, and message sequence even if the source JSON file later changes.
 
 ## Scheduling
 
@@ -124,7 +124,7 @@ By default, local data is written to `.ava_warmup_history/`.
 - `runs/`: full JSON reports for recent runs.
 - `model_warmup_schedule.json`: persistent schedule state.
 
-History retention defaults to `50` runs. The newest `20` reports stay as full JSON, the next `20` are compressed as gzip JSON, and older retained entries become summary-only. Do not commit `.ava_warmup_history/`, `.env`, `config.yaml`, deployment IDs, raw transcripts, or customer conversation artifacts.
+History retention defaults to `50` runs. The newest `20` reports stay as full JSON, the next `20` are compressed as gzip JSON, and older retained entries become summary-only. The checked-in `warmup_suites/` directory is suite configuration, not run history. Do not commit `.ava_warmup_history/`, `.env`, `config.yaml`, deployment IDs, raw transcripts, or customer conversation artifacts.
 
 ## Configuration
 
@@ -165,9 +165,9 @@ All run and schedule endpoints accept form data. Endpoints that receive JSON, or
 - `POST /run/model_warm_up/schedule/disable`: cancel the schedule; equivalent to `/cancel`.
 - `GET /run/model_warm_up/schedule/status`: return persisted schedule status.
 - `GET /results`: render the metrics dashboard. Use `?history_run_id=<run_id>` to view a specific retained history run.
-- `GET /results/history?limit=100`: return local warm-up run history. `limit` is clamped to `1..100`.
-- `GET /results/export?format=json`: export the latest, in-progress, or selected report as JSON.
-- `GET /results/export?format=csv`: export a compact metrics CSV named `ava_spec_warm_up_metrics.csv`.
+- `GET /results/history?limit=100`: return local warm-up run history, including suite name, scenario name, and selected warm-up messages. `limit` is clamped to `1..100`.
+- `GET /results/export?format=json`: export the latest, in-progress, or selected report as JSON, including suite/scenario/message metadata.
+- `GET /results/export?format=csv`: export a compact metrics CSV named `ava_spec_warm_up_metrics.csv`, including suite name, scenario name, fixed message, and ordered warm-up messages.
 - `GET /results/export?format=png`: export the results performance card as `ava_spec_warm_up_results.png`. Requires Playwright Chromium.
 
 For exports, add `history_run_id=<run_id>` to export a specific retained history report.
