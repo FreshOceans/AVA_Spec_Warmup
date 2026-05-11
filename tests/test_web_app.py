@@ -1,5 +1,6 @@
 """Focused Flask route tests for the standalone warm-up app."""
 
+import json
 from datetime import datetime, timezone
 import time
 
@@ -35,15 +36,21 @@ class _FakeWarmUpRunner:
     async def run(self, request: ModelWarmUpRunRequest) -> WarmupTestReport:
         attempts = []
         for attempt_number in range(1, request.attempt_count + 1):
+            conversation = [
+                Message(role=MessageRole.AGENT, content="Welcome", timestamp=datetime.now(timezone.utc)),
+            ]
+            for warmup_message in request.suite_spec.messages:
+                conversation.extend(
+                    [
+                        Message(role=MessageRole.USER, content=warmup_message, timestamp=datetime.now(timezone.utc)),
+                        Message(role=MessageRole.AGENT, content="Goodbye", timestamp=datetime.now(timezone.utc)),
+                    ]
+                )
             attempts.append(
                 AttemptResult(
                     attempt_number=attempt_number,
                     success=True,
-                    conversation=[
-                        Message(role=MessageRole.AGENT, content="Welcome", timestamp=datetime.now(timezone.utc)),
-                        Message(role=MessageRole.USER, content=MODEL_WARMUP_FIXED_MESSAGE, timestamp=datetime.now(timezone.utc)),
-                        Message(role=MessageRole.AGENT, content="Goodbye", timestamp=datetime.now(timezone.utc)),
-                    ],
+                    conversation=conversation,
                     explanation="AVA Spec Warm Up completed; no judgement performed.",
                     started_at=datetime.now(timezone.utc),
                     completed_at=datetime.now(timezone.utc),
@@ -57,7 +64,7 @@ class _FakeWarmUpRunner:
                 )
             )
         scenario = ScenarioResult(
-            scenario_name=MODEL_WARMUP_SCENARIO_NAME,
+            scenario_name=request.suite_spec.scenario_name,
             attempts=len(attempts),
             successes=len(attempts),
             failures=0,
@@ -68,7 +75,7 @@ class _FakeWarmUpRunner:
             attempt_results=attempts,
         )
         return WarmupTestReport(
-            suite_name=MODEL_WARMUP_SUITE_NAME,
+            suite_name=request.suite_spec.suite_name,
             timestamp=datetime.now(timezone.utc),
             duration_seconds=0.05,
             scenario_results=[scenario],
@@ -96,7 +103,19 @@ class _FakeWarmUpRunner:
 @pytest.fixture
 def app(tmp_path, monkeypatch):
     monkeypatch.setattr("ava_warmup.web_app.ModelWarmUpRunner", _FakeWarmUpRunner)
-    return create_app(
+    suite_dir = tmp_path / "warmup_suites"
+    suite_dir.mkdir()
+    (suite_dir / "custom_support.json").write_text(
+        json.dumps(
+            {
+                "suite_name": "Custom Support Warm Up",
+                "scenario_name": "Two Message Check",
+                "messages": ["hello", "no help needed"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    flask_app = create_app(
         AppConfig(
             history_dir=str(tmp_path),
             history_max_runs=10,
@@ -104,6 +123,8 @@ def app(tmp_path, monkeypatch):
             history_gzip_runs=0,
         )
     )
+    flask_app.config["warmup_suites_project_root"] = tmp_path
+    return flask_app
 
 
 @pytest.fixture
@@ -128,6 +149,8 @@ def test_home_renders_warmup_only_form(client):
     assert response.status_code == 200
     body = response.get_data(as_text=True)
     assert "AVA Spec Warm Up" in body
+    assert "Custom Support Warm Up" in body
+    assert "Selected Suite Details" in body
     assert "Suite Builder" not in body
     assert "Transcript" not in body
 
@@ -166,6 +189,31 @@ def test_run_model_warm_up_json_completes_and_persists_history(client):
     assert "Welcome" in results_body
     assert MODEL_WARMUP_FIXED_MESSAGE in results_body
     assert "Back to Top" in results_body
+
+
+def test_run_model_warm_up_uses_selected_custom_suite(client):
+    response = client.post(
+        "/run/model_warm_up",
+        json={
+            "deployment_id": "deploy-123",
+            "region": "usw2.pure.cloud",
+            "attempt_count": 1,
+            "execution_mode": "serial",
+            "pacing_seconds": 1.0,
+            "suite_id": "custom_support",
+        },
+    )
+    assert response.status_code == 202
+
+    _wait_until_idle(client)
+
+    exported = client.get("/results/export?format=json").get_json()
+    warmup = exported["model_warmup_run"]
+    assert exported["suite_name"] == "Custom Support Warm Up"
+    assert warmup["suite_name"] == "Custom Support Warm Up"
+    assert warmup["scenario_name"] == "Two Message Check"
+    assert warmup["fixed_message"] == "hello"
+    assert warmup["warmup_messages"] == ["hello", "no help needed"]
 
 
 def test_completed_attempts_section_collapses_while_run_active(app, client):
@@ -222,10 +270,58 @@ def test_schedule_save_status_and_cancel(client):
 
     status = client.get("/run/model_warm_up/schedule/status").get_json()
     assert status["scheduled_warmups"][0]["run_request"]["attempt_count"] == 3
+    assert status["scheduled_warmups"][0]["run_request"]["suite_spec"]["suite_name"] == "AVA Spec Warm Up Suite"
 
     cancel = client.post("/run/model_warm_up/schedule/cancel", json={})
     assert cancel.status_code == 200
     assert cancel.get_json()["schedule"]["enabled"] is False
+
+
+def test_schedule_persists_selected_custom_suite(client):
+    response = client.post(
+        "/run/model_warm_up/schedule",
+        json={
+            "deployment_id": "deploy-123",
+            "region": "usw2.pure.cloud",
+            "attempt_count": 3,
+            "execution_mode": "serial",
+            "pacing_seconds": 1.0,
+            "suite_id": "custom_support",
+            "cadence": "daily",
+            "timezone_name": "UTC",
+            "time_hhmm": "02:00",
+            "start_date": "2099-04-27",
+            "end_date": "2099-04-30",
+        },
+    )
+
+    assert response.status_code == 200
+    run_request = response.get_json()["schedule"]["run_request"]
+    assert run_request["suite_id"] == "custom_support"
+    assert run_request["suite_spec"]["suite_name"] == "Custom Support Warm Up"
+    assert run_request["suite_spec"]["messages"] == ["hello", "no help needed"]
+
+
+def test_malformed_selected_suite_returns_validation_error(app, client, tmp_path):
+    (tmp_path / "warmup_suites" / "broken.json").write_text(
+        '{"suite_name": "Broken", "scenario_name": "Broken"}',
+        encoding="utf-8",
+    )
+
+    response = client.post(
+        "/run/model_warm_up",
+        json={
+            "deployment_id": "deploy-123",
+            "region": "usw2.pure.cloud",
+            "attempt_count": 1,
+            "execution_mode": "serial",
+            "pacing_seconds": 1.0,
+            "suite_id": "broken",
+        },
+    )
+
+    assert response.status_code == 400
+    assert "messages must be a non-empty list" in response.get_json()["errors"][0]
 
 
 def test_results_export_json_and_csv(client):

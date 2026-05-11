@@ -1,12 +1,12 @@
 # AVA Spec Warm Up
 
-Standalone Flask application for warming up a Genesys Cloud AVA/Web Messaging deployment. It opens Web Messaging conversations, sends the fixed message `no help needed`, records transport timing metrics, and uses a locally installed LLM for the warm-up workflow.
+Standalone Flask application for warming up a Genesys Cloud AVA/Web Messaging deployment. It opens Web Messaging conversations, sends a default or custom warm-up message sequence, records transport timing metrics, and uses a locally installed LLM for the warm-up workflow.
 
 ## What It Does
 
-- Runs the fixed suite `AVA Spec Warm Up Suite`.
-- Runs the fixed scenario `No Help Needed Warm Up`.
-- Sends exactly `no help needed` for every attempt.
+- Runs the default suite `AVA Spec Warm Up Suite`.
+- Runs the default scenario `No Help Needed Warm Up`.
+- Sends `no help needed` for every default-suite attempt, with optional custom JSON suites under `warmup_suites/`.
 - Uses a local Ollama model. `gemma4:e4b` is recommended because this application has been optimized for it.
 - Captures Web Messaging transport success, timeout, failure, latency, stage timing, and compact diagnostics.
 - Supports manual runs, one persistent local schedule, live status, stop requests, local history, and JSON/CSV/PNG exports.
@@ -65,7 +65,7 @@ Open `http://localhost:5000`. The app runs on `0.0.0.0:5000` with Flask debug mo
 
 ## Running A Warm-Up
 
-Use the `Run` page to start a manual warm-up. Deployment ID and region are required, either from the form or environment defaults. Enter `gemma4:e4b` in the LLM model label field after installing it locally with Ollama.
+Use the `Run` page to start a manual warm-up. Deployment ID and region are required, either from the form or environment defaults. Enter `gemma4:e4b` in the LLM Model field after installing it locally with Ollama. Choose a warm-up suite from the selector; the default suite remains selected unless you choose a custom suite file.
 
 Run controls:
 
@@ -74,8 +74,34 @@ Run controls:
 - `Parallel Workers`: used only for parallel mode; allowed range is `1` to `5`.
 - `Pacing`: allowed values are `0.5`, `1.0`, `2.5`, `5.0`, and `7.5` seconds.
 - `Performance Profile`: only `safe_adaptive` is supported. It reduces effective worker or pacing pressure when timeout or error pressure rises.
+- `Warm-Up Suite`: selects the built-in default or a custom JSON suite saved under `warmup_suites/`.
 
 After a run starts, the `Results` page shows live progress and polls `/run/status`. You can request a cooperative stop with `Stop Run`. Completed and in-progress results include success rate, attempts/sec, timeout and failure counts, duration percentiles, per-stage Web Messaging percentiles, live diagnostics, completed attempt details, adaptive adjustments, schedule status, and local run history.
+
+## Designing Custom Warm-Up Suites
+
+Custom warm-up suites are JSON files saved in the repository’s `warmup_suites/` directory. The filename becomes the selectable suite id, so `warmup_suites/custom_support.json` is selected with `suite_id=custom_support` in the API.
+
+Each file uses this structure:
+
+```json
+{
+  "suite_name": "Custom Support Warm Up",
+  "scenario_name": "Two Message Check",
+  "messages": [
+    "hello",
+    "no help needed"
+  ]
+}
+```
+
+Fields:
+
+- `suite_name`: display and report name for the suite.
+- `scenario_name`: scenario name shown in reports and progress events.
+- `messages`: ordered list of non-empty user messages sent during each attempt.
+
+The checked-in `warmup_suites/ava_spec_default.json` mirrors the built-in default, and `warmup_suites/example_custom.json` shows a simple two-message custom routine. Custom schedules persist the full selected suite spec, so a saved schedule keeps using the same message sequence even if the source JSON file later changes.
 
 ## Scheduling
 
@@ -131,7 +157,7 @@ python3 -m ava_warmup
 All run and schedule endpoints accept form data. Endpoints that receive JSON, or requests with `Accept: application/json`, return JSON responses.
 
 - `GET /`: render the run and schedule page.
-- `POST /run/model_warm_up`: start a background run. Accepts `deployment_id`, `region`, optional `recorded_model`, `attempt_count`, `execution_mode`, `worker_count`, `pacing_seconds`, and `performance_profile`. JSON success returns `202` with `{ok, run_id, results_url}`. Validation errors return `400`; an active run returns `409`.
+- `POST /run/model_warm_up`: start a background run. Accepts `deployment_id`, `region`, optional `recorded_model`, `attempt_count`, `execution_mode`, `worker_count`, `pacing_seconds`, `performance_profile`, and `suite_id`. JSON success returns `202` with `{ok, run_id, results_url}`. Validation errors return `400`; an active run returns `409`.
 - `GET /run/status`: return active run state, trigger source, stop state, warm-up metadata, live progress, and recent progress events.
 - `POST /run/stop`: request that the active run stop. JSON success returns `{ok, stop_requested}`; no active run returns `409`.
 - `POST /run/model_warm_up/schedule`: save and enable the persistent schedule. Accepts the run fields plus schedule fields such as `cadence`, `timezone_name`, `start_date`, `end_date`, `minute`, `time_hhmm`, `weekday`, and `day_of_month`.

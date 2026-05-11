@@ -1,0 +1,8 @@
+{
+  "suite_name": "Example Custom Warm Up",
+  "scenario_name": "Two Message Example",
+  "messages": [
+    "hello",
+    "no help needed"
+  ]
+}

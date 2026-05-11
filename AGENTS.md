@@ -7,16 +7,18 @@ This repository is the standalone **AVA Spec Warm Up** application. It exists on
 ## Product Scope
 
 - Single workflow: AVA Spec Warm Up.
-- Fixed suite: `AVA Spec Warm Up Suite`.
-- Fixed scenario: `No Help Needed Warm Up`.
-- Fixed message: `no help needed`.
+- Default suite: `AVA Spec Warm Up Suite`.
+- Default scenario: `No Help Needed Warm Up`.
+- Default message: `no help needed`.
+- Custom user-provided warm-up suites are supported through JSON files under `warmup_suites/`.
 - No Judge LLM calls.
 - No Ollama dependency.
-- No suite builder, transcript import, analytics journey, intent validation, or journey validation features.
+- No visual suite builder, transcript import, analytics journey, intent validation, or journey validation features.
 
 ## Core Files
 
 - `ava_warmup/runner.py`: async Web Messaging warm-up runner, request normalization, adaptive backpressure, and report assembly.
+- `ava_warmup/suites.py`: warm-up suite spec validation, default suite values, and JSON file loading.
 - `ava_warmup/scheduler.py`: persistent schedule store, cadence/date math, and scheduler daemon.
 - `ava_warmup/web_messaging_client.py`: Genesys Cloud Web Messaging Guest API client.
 - `ava_warmup/web_app.py`: Flask app factory, background run state, run/status/stop/schedule/results/export routes.
@@ -27,7 +29,8 @@ This repository is the standalone **AVA Spec Warm Up** application. It exists on
 
 ## Behavioral Contracts
 
-- Warm-up attempts must send exactly `no help needed` unless the product scope is explicitly changed.
+- Warm-up attempts must send `no help needed` for the default suite; selected custom suites may send their ordered user-provided messages.
+- Custom suite JSON files live under `warmup_suites/` and use `suite_name`, `scenario_name`, and `messages`.
 - Successful attempts retain compact transport/stage timings and do not include judge diagnostics.
 - `safe_adaptive` is the only performance profile.
 - Pacing choices are `0.5`, `1.0`, `2.5`, `5.0`, and `7.5` seconds.
@@ -54,6 +57,7 @@ Keep these routes backward-compatible unless intentionally changing the standalo
 
 - Do not commit `.ava_warmup_history/`, `.env`, or `config.yaml`.
 - Do not commit customer deployment IDs, raw transcripts, conversation artifacts, or local schedules.
+- Do commit generic example suite files, but do not commit customer-specific custom suite files unless explicitly requested.
 - History tests should isolate `AVA_WARMUP_HISTORY_DIR` or use temp directories.
 
 ## Validation

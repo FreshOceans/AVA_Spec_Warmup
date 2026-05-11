@@ -182,7 +182,10 @@ class ModelWarmupRunMetadata(BaseModel):
     duration_percentiles: dict[str, float] = Field(default_factory=dict)
     stage_duration_percentiles: dict[str, dict[str, float]] = Field(default_factory=dict)
     adaptive_adjustments: list[dict[str, Any]] = Field(default_factory=list)
+    suite_name: str = "AVA Spec Warm Up Suite"
+    scenario_name: str = "No Help Needed Warm Up"
     fixed_message: str = "no help needed"
+    warmup_messages: list[str] = Field(default_factory=lambda: ["no help needed"])
     planned_attempts: int = 228
     completed_attempts: int = 0
     trigger_source: str = "manual"

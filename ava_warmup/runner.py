@@ -23,11 +23,18 @@ from .schemas import (
     TestReport,
     TimeoutDiagnostics,
 )
+from .suites import (
+    DEFAULT_WARMUP_MESSAGE,
+    DEFAULT_WARMUP_SCENARIO_NAME,
+    DEFAULT_WARMUP_SUITE,
+    DEFAULT_WARMUP_SUITE_NAME,
+    WarmupSuiteSpec,
+)
 from .web_messaging_client import WebMessagingClient, WebMessagingError
 
-MODEL_WARMUP_SUITE_NAME = "AVA Spec Warm Up Suite"
-MODEL_WARMUP_SCENARIO_NAME = "No Help Needed Warm Up"
-MODEL_WARMUP_FIXED_MESSAGE = "no help needed"
+MODEL_WARMUP_SUITE_NAME = DEFAULT_WARMUP_SUITE_NAME
+MODEL_WARMUP_SCENARIO_NAME = DEFAULT_WARMUP_SCENARIO_NAME
+MODEL_WARMUP_FIXED_MESSAGE = DEFAULT_WARMUP_MESSAGE
 MODEL_WARMUP_DEFAULT_ATTEMPTS = 228
 MODEL_WARMUP_PACING_CHOICES = {0.5, 1.0, 2.5, 5.0, 7.5}
 MODEL_WARMUP_PERFORMANCE_PROFILE_SAFE_ADAPTIVE = "safe_adaptive"
@@ -54,6 +61,7 @@ class ModelWarmUpRunRequest:
     scheduled_fire_at_utc: Optional[datetime] = None
     schedule_cadence: Optional[str] = None
     schedule_label: Optional[str] = None
+    suite_spec: WarmupSuiteSpec = DEFAULT_WARMUP_SUITE
 
 
 def normalize_model_warmup_execution_mode(value: str) -> str:
@@ -163,7 +171,10 @@ def build_model_warmup_metadata(
         duration_percentiles=duration_percentiles or {},
         stage_duration_percentiles=stage_duration_percentiles or {},
         adaptive_adjustments=adaptive_adjustments or [],
-        fixed_message=MODEL_WARMUP_FIXED_MESSAGE,
+        suite_name=request.suite_spec.suite_name,
+        scenario_name=request.suite_spec.scenario_name,
+        fixed_message=request.suite_spec.first_message,
+        warmup_messages=list(request.suite_spec.messages),
         planned_attempts=normalize_model_warmup_attempt_count(request.attempt_count),
         completed_attempts=max(0, int(completed_attempts)),
         trigger_source=request.trigger_source,
@@ -364,30 +375,32 @@ class ModelWarmUpRunner:
             conversation.append(
                 Message(role=MessageRole.AGENT, content=welcome, timestamp=datetime.now(timezone.utc))
             )
-            conversation.append(
-                Message(
-                    role=MessageRole.USER,
-                    content=MODEL_WARMUP_FIXED_MESSAGE,
-                    timestamp=datetime.now(timezone.utc),
+            for message_index, warmup_message in enumerate(request.suite_spec.messages, start=1):
+                conversation.append(
+                    Message(
+                        role=MessageRole.USER,
+                        content=warmup_message,
+                        timestamp=datetime.now(timezone.utc),
+                    )
                 )
-            )
-            await run_recorded_step(
-                "message_send",
-                f"Sending warm-up message: {MODEL_WARMUP_FIXED_MESSAGE}",
-                client.send_message(MODEL_WARMUP_FIXED_MESSAGE),
-            )
-            agent_response = await run_recorded_step(
-                "agent_response_wait",
-                "Waiting for agent response",
-                client.receive_response(),
-            )
-            conversation.append(
-                Message(
-                    role=MessageRole.AGENT,
-                    content=agent_response,
-                    timestamp=datetime.now(timezone.utc),
+                stage_suffix = "" if message_index == 1 else f"_{message_index}"
+                await run_recorded_step(
+                    f"message_send{stage_suffix}",
+                    f"Sending warm-up message {message_index}: {warmup_message}",
+                    client.send_message(warmup_message),
                 )
-            )
+                agent_response = await run_recorded_step(
+                    f"agent_response_wait{stage_suffix}",
+                    f"Waiting for agent response {message_index}",
+                    client.receive_response(),
+                )
+                conversation.append(
+                    Message(
+                        role=MessageRole.AGENT,
+                        content=agent_response,
+                        timestamp=datetime.now(timezone.utc),
+                    )
+                )
             result_payload = {
                 "success": True,
                 "explanation": "AVA Spec Warm Up completed; no judgement performed.",
@@ -457,6 +470,7 @@ class ModelWarmUpRunner:
         performance_profile = normalize_model_warmup_performance_profile(
             request.performance_profile
         )
+        suite = request.suite_spec
         planned_attempts = normalize_model_warmup_attempt_count(request.attempt_count)
         active_worker_limit = worker_count
         effective_pacing_seconds = pacing_seconds
@@ -476,8 +490,8 @@ class ModelWarmUpRunner:
         self.progress_emitter.emit(
             ProgressEvent(
                 event_type=ProgressEventType.SUITE_STARTED,
-                suite_name=MODEL_WARMUP_SUITE_NAME,
-                message=f"Starting AVA Spec Warm Up suite: {MODEL_WARMUP_SUITE_NAME}",
+                suite_name=suite.suite_name,
+                message=f"Starting AVA Spec Warm Up suite: {suite.suite_name}",
                 planned_attempts=planned_attempts,
                 completed_attempts=completed_attempts,
             )
@@ -485,10 +499,10 @@ class ModelWarmUpRunner:
         self.progress_emitter.emit(
             ProgressEvent(
                 event_type=ProgressEventType.SCENARIO_STARTED,
-                suite_name=MODEL_WARMUP_SUITE_NAME,
-                scenario_name=MODEL_WARMUP_SCENARIO_NAME,
+                suite_name=suite.suite_name,
+                scenario_name=suite.scenario_name,
                 message=(
-                    f"Starting scenario: {MODEL_WARMUP_SCENARIO_NAME} "
+                    f"Starting scenario: {suite.scenario_name} "
                     f"({planned_attempts} attempts)"
                 ),
                 planned_attempts=planned_attempts,
@@ -498,14 +512,15 @@ class ModelWarmUpRunner:
         self.progress_emitter.emit(
             ProgressEvent(
                 event_type=ProgressEventType.ATTEMPT_STATUS,
-                suite_name=MODEL_WARMUP_SUITE_NAME,
-                scenario_name=MODEL_WARMUP_SCENARIO_NAME,
+                suite_name=suite.suite_name,
+                scenario_name=suite.scenario_name,
                 message=(
                     "AVA Spec Warm Up configured: "
                     f"mode={execution_mode}, workers={worker_count}, "
                     f"pacing={pacing_seconds:.1f}s, "
                     f"profile={performance_profile}, "
-                    f"model={request.recorded_model or 'not recorded'}"
+                    f"model={request.recorded_model or 'not recorded'}, "
+                    f"suite={suite.suite_name}"
                 ),
                 planned_attempts=planned_attempts,
                 completed_attempts=completed_attempts,
@@ -516,8 +531,8 @@ class ModelWarmUpRunner:
             self.progress_emitter.emit(
                 ProgressEvent(
                     event_type=ProgressEventType.ATTEMPT_STATUS,
-                    suite_name=MODEL_WARMUP_SUITE_NAME,
-                    scenario_name=MODEL_WARMUP_SCENARIO_NAME,
+                    suite_name=suite.suite_name,
+                    scenario_name=suite.scenario_name,
                     message=message,
                     planned_attempts=planned_attempts,
                     completed_attempts=completed_attempts,
@@ -626,8 +641,8 @@ class ModelWarmUpRunner:
                     self.progress_emitter.emit(
                         ProgressEvent(
                             event_type=ProgressEventType.ATTEMPT_STARTED,
-                            suite_name=MODEL_WARMUP_SUITE_NAME,
-                            scenario_name=MODEL_WARMUP_SCENARIO_NAME,
+                            suite_name=suite.suite_name,
+                            scenario_name=suite.scenario_name,
                             attempt_number=attempt_number,
                             message=f"Attempt {attempt_number} started",
                             planned_attempts=planned_attempts,
@@ -657,8 +672,8 @@ class ModelWarmUpRunner:
                     self.progress_emitter.emit(
                         ProgressEvent(
                             event_type=ProgressEventType.ATTEMPT_COMPLETED,
-                            suite_name=MODEL_WARMUP_SUITE_NAME,
-                            scenario_name=MODEL_WARMUP_SCENARIO_NAME,
+                            suite_name=suite.suite_name,
+                            scenario_name=suite.scenario_name,
                             attempt_number=result.attempt_number,
                             success=result.success,
                             message=(
@@ -696,7 +711,7 @@ class ModelWarmUpRunner:
             stage: _percentiles(values) for stage, values in sorted(stage_values.items())
         }
         scenario = ScenarioResult(
-            scenario_name=MODEL_WARMUP_SCENARIO_NAME,
+            scenario_name=suite.scenario_name,
             attempts=len(attempts),
             successes=successes,
             failures=failures,
@@ -707,7 +722,7 @@ class ModelWarmUpRunner:
             attempt_results=attempts,
         )
         report = TestReport(
-            suite_name=MODEL_WARMUP_SUITE_NAME,
+            suite_name=suite.suite_name,
             timestamp=datetime.now(timezone.utc),
             duration_seconds=duration,
             scenario_results=[scenario] if attempts else [],
@@ -748,11 +763,11 @@ class ModelWarmUpRunner:
         self.progress_emitter.emit(
             ProgressEvent(
                 event_type=ProgressEventType.SCENARIO_COMPLETED,
-                suite_name=MODEL_WARMUP_SUITE_NAME,
-                scenario_name=MODEL_WARMUP_SCENARIO_NAME,
+                suite_name=suite.suite_name,
+                scenario_name=suite.scenario_name,
                 success_rate=success_rate,
                 message=(
-                    f"Scenario completed: {MODEL_WARMUP_SCENARIO_NAME} - "
+                    f"Scenario completed: {suite.scenario_name} - "
                     f"{success_rate:.0%} completion rate"
                 ),
                 planned_attempts=planned_attempts,
@@ -760,17 +775,17 @@ class ModelWarmUpRunner:
             )
         )
         completed_message = (
-            f"AVA Spec Warm Up completed: {MODEL_WARMUP_SUITE_NAME} in {duration:.1f}s"
+            f"AVA Spec Warm Up completed: {suite.suite_name} in {duration:.1f}s"
         )
         if self._stop_requested():
             completed_message = (
-                f"AVA Spec Warm Up stopped early: {MODEL_WARMUP_SUITE_NAME} "
+                f"AVA Spec Warm Up stopped early: {suite.suite_name} "
                 f"after {duration:.1f}s"
             )
         self.progress_emitter.emit(
             ProgressEvent(
                 event_type=ProgressEventType.SUITE_COMPLETED,
-                suite_name=MODEL_WARMUP_SUITE_NAME,
+                suite_name=suite.suite_name,
                 message=completed_message,
                 duration_seconds=duration,
                 planned_attempts=planned_attempts,

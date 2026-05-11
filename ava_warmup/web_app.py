@@ -58,6 +58,14 @@ from .scheduler import (
     validate_schedule_timezone_name,
 )
 from .schemas import AppConfig, ModelWarmupRunMetadata, ProgressEventType, TestReport
+from .suites import (
+    DEFAULT_WARMUP_SUITE,
+    DEFAULT_WARMUP_SUITE_ID,
+    WarmupSuiteSpec,
+    load_available_suites,
+    resolve_suite,
+    suite_from_request_payload,
+)
 
 
 @dataclass
@@ -128,6 +136,33 @@ def create_app(config: Optional[AppConfig] = None) -> Flask:
                 return value
         return default
 
+    def _suite_project_root() -> Path:
+        return Path(app.config.get("warmup_suites_project_root") or project_root)
+
+    def _available_suite_context(selected_suite_id: str | None = None) -> dict[str, Any]:
+        suites, suite_errors = load_available_suites(_suite_project_root())
+        selected = selected_suite_id or DEFAULT_WARMUP_SUITE_ID
+        if not any(suite.suite_id == selected for suite in suites):
+            selected = DEFAULT_WARMUP_SUITE_ID
+        return {
+            "warmup_suites": suites,
+            "warmup_suite_errors": suite_errors,
+            "selected_suite_id": selected,
+        }
+
+    def _render_home(status_code: int = 200, *, errors: list[str] | None = None, selected_suite_id: str | None = None):
+        context = _available_suite_context(selected_suite_id)
+        return render_template(
+            "home.html",
+            config=app.config["app_config"],
+            errors=errors or [],
+            model_warmup_schedule_status=_schedule_store().load(),
+            fixed_message=MODEL_WARMUP_FIXED_MESSAGE,
+            default_attempts=MODEL_WARMUP_DEFAULT_ATTEMPTS,
+            pacing_choices=sorted(MODEL_WARMUP_PACING_CHOICES),
+            **context,
+        ), status_code
+
     def _history_store() -> RunHistoryStore:
         return app.config["history_store"]
 
@@ -159,6 +194,8 @@ def create_app(config: Optional[AppConfig] = None) -> Flask:
                 {
                     "run_id": entry.get("run_id"),
                     "suite_name": entry.get("suite_name"),
+                    "scenario_name": warmup_summary.get("scenario_name"),
+                    "warmup_messages": warmup_summary.get("warmup_messages"),
                     "timestamp": entry.get("timestamp"),
                     "overall_attempts": entry.get("overall_attempts"),
                     "overall_success_rate": entry.get("overall_success_rate"),
@@ -216,6 +253,8 @@ def create_app(config: Optional[AppConfig] = None) -> Flask:
                 else None
             ),
             "run_id": entry.get("run_id") if isinstance(entry, dict) else None,
+            "suite_name": warmup.suite_name,
+            "scenario_name": warmup.scenario_name,
             "overall_attempts": report.overall_attempts,
             "overall_success_rate": report.overall_success_rate,
             "duration_seconds": report.duration_seconds,
@@ -282,6 +321,17 @@ def create_app(config: Optional[AppConfig] = None) -> Flask:
         skipped = sum(1 for attempt in attempts if attempt.skipped)
         failures = max(0, len(attempts) - successes - timeouts - skipped)
         success_rate = successes / len(attempts) if attempts else 0.0
+        warmup_metadata = app.config.get("active_model_warmup_metadata")
+        suite_name = (
+            warmup_metadata.suite_name
+            if isinstance(warmup_metadata, ModelWarmupRunMetadata)
+            else MODEL_WARMUP_SUITE_NAME
+        )
+        scenario_name = (
+            warmup_metadata.scenario_name
+            if isinstance(warmup_metadata, ModelWarmupRunMetadata)
+            else MODEL_WARMUP_SCENARIO_NAME
+        )
         started_at = next(
             (
                 event.emitted_at
@@ -295,7 +345,7 @@ def create_app(config: Optional[AppConfig] = None) -> Flask:
             (datetime.now(timezone.utc) - started_at).total_seconds(),
         )
         scenario = {
-            "scenario_name": MODEL_WARMUP_SCENARIO_NAME,
+            "scenario_name": scenario_name,
             "attempts": len(attempts),
             "successes": successes,
             "failures": failures,
@@ -306,7 +356,7 @@ def create_app(config: Optional[AppConfig] = None) -> Flask:
             "attempt_results": attempts,
         }
         report = TestReport(
-            suite_name=MODEL_WARMUP_SUITE_NAME,
+            suite_name=suite_name,
             timestamp=datetime.now(timezone.utc),
             duration_seconds=duration_seconds,
             scenario_results=[scenario] if attempts else [],
@@ -319,7 +369,6 @@ def create_app(config: Optional[AppConfig] = None) -> Flask:
             has_regressions=bool(attempts and success_rate < threshold),
             regression_threshold=threshold,
         )
-        warmup_metadata = app.config.get("active_model_warmup_metadata")
         if isinstance(warmup_metadata, ModelWarmupRunMetadata):
             report.model_warmup_run = warmup_metadata.model_copy(
                 update={"completed_attempts": len(attempts)}
@@ -516,8 +565,19 @@ def create_app(config: Optional[AppConfig] = None) -> Flask:
             "performance_profile",
             default="safe_adaptive",
         )
+        suite_id_raw = _field(
+            data,
+            "model_warmup_suite_id",
+            "suite_id",
+            default=DEFAULT_WARMUP_SUITE_ID,
+        )
 
         errors: list[str] = []
+        try:
+            suite_spec = resolve_suite(_suite_project_root(), str(suite_id_raw or DEFAULT_WARMUP_SUITE_ID))
+        except ValueError as exc:
+            errors.append(str(exc))
+            suite_spec = DEFAULT_WARMUP_SUITE
         if not deployment_id:
             errors.append("Deployment ID is required for AVA Spec Warm Up.")
         if not region:
@@ -566,6 +626,7 @@ def create_app(config: Optional[AppConfig] = None) -> Flask:
                 pacing_seconds=pacing_seconds,
                 performance_profile=performance_profile,
                 attempt_count=attempt_count,
+                suite_spec=suite_spec,
             ),
             [],
         )
@@ -580,9 +641,17 @@ def create_app(config: Optional[AppConfig] = None) -> Flask:
             "pacing_seconds": run_request.pacing_seconds,
             "performance_profile": run_request.performance_profile,
             "attempt_count": run_request.attempt_count,
+            "suite_id": run_request.suite_spec.suite_id,
+            "suite_spec": run_request.suite_spec.to_dict(),
         }
 
     def _model_warmup_request_from_dict(payload: dict[str, Any]) -> ModelWarmUpRunRequest:
+        suite_payload = payload.get("suite_spec")
+        if isinstance(suite_payload, dict):
+            suite_spec = suite_from_request_payload(suite_payload)
+        else:
+            suite_id = str(payload.get("suite_id") or DEFAULT_WARMUP_SUITE_ID).strip()
+            suite_spec = resolve_suite(_suite_project_root(), suite_id)
         return ModelWarmUpRunRequest(
             deployment_id=str(payload.get("deployment_id") or "").strip(),
             region=str(payload.get("region") or "").strip(),
@@ -600,6 +669,7 @@ def create_app(config: Optional[AppConfig] = None) -> Flask:
             attempt_count=normalize_model_warmup_attempt_count(
                 payload.get("attempt_count", MODEL_WARMUP_DEFAULT_ATTEMPTS)
             ),
+            suite_spec=suite_spec,
         )
 
     def _parse_model_warmup_schedule(
@@ -846,18 +916,9 @@ def create_app(config: Optional[AppConfig] = None) -> Flask:
 
     @app.route("/")
     def home():
-        cfg = app.config["app_config"]
         schedule_status = _schedule_store().load()
         app.config["model_warmup_schedule_status"] = schedule_status
-        return render_template(
-            "home.html",
-            config=cfg,
-            errors=[],
-            model_warmup_schedule_status=schedule_status,
-            fixed_message=MODEL_WARMUP_FIXED_MESSAGE,
-            default_attempts=MODEL_WARMUP_DEFAULT_ATTEMPTS,
-            pacing_choices=sorted(MODEL_WARMUP_PACING_CHOICES),
-        )
+        return _render_home()
 
     @app.route("/run/model_warm_up", methods=["POST"])
     def run_model_warm_up():
@@ -871,15 +932,13 @@ def create_app(config: Optional[AppConfig] = None) -> Flask:
         if errors or run_request is None:
             if _wants_json():
                 return jsonify({"ok": False, "errors": errors}), 400
-            return render_template(
-                "home.html",
-                config=app.config["app_config"],
+            return _render_home(
+                400,
                 errors=errors,
-                model_warmup_schedule_status=_schedule_store().load(),
-                fixed_message=MODEL_WARMUP_FIXED_MESSAGE,
-                default_attempts=MODEL_WARMUP_DEFAULT_ATTEMPTS,
-                pacing_choices=sorted(MODEL_WARMUP_PACING_CHOICES),
-            ), 400
+                selected_suite_id=str(
+                    _field(data, "model_warmup_suite_id", "suite_id", default=DEFAULT_WARMUP_SUITE_ID)
+                ),
+            )
 
         base_config = app.config["app_config"]
         merged_config = merge_config(
@@ -959,15 +1018,13 @@ def create_app(config: Optional[AppConfig] = None) -> Flask:
         if errors or schedule_payload is None:
             if _wants_json():
                 return jsonify({"ok": False, "errors": errors}), 400
-            return render_template(
-                "home.html",
-                config=app.config["app_config"],
+            return _render_home(
+                400,
                 errors=errors,
-                model_warmup_schedule_status=_schedule_store().load(),
-                fixed_message=MODEL_WARMUP_FIXED_MESSAGE,
-                default_attempts=MODEL_WARMUP_DEFAULT_ATTEMPTS,
-                pacing_choices=sorted(MODEL_WARMUP_PACING_CHOICES),
-            ), 400
+                selected_suite_id=str(
+                    _field(data, "model_warmup_suite_id", "suite_id", default=DEFAULT_WARMUP_SUITE_ID)
+                ),
+            )
         app.config["model_warmup_schedule_status"] = _schedule_store().save_schedule(
             schedule_payload
         )
@@ -1094,6 +1151,9 @@ def create_app(config: Optional[AppConfig] = None) -> Flask:
                 output,
                 fieldnames=[
                     "suite_name",
+                    "scenario_name",
+                    "fixed_message",
+                    "warmup_messages",
                     "timestamp",
                     "planned_attempts",
                     "completed_attempts",
@@ -1118,6 +1178,9 @@ def create_app(config: Optional[AppConfig] = None) -> Flask:
             writer.writerow(
                 {
                     "suite_name": report.suite_name,
+                    "scenario_name": warmup.scenario_name if warmup else None,
+                    "fixed_message": warmup.fixed_message if warmup else None,
+                    "warmup_messages": " | ".join(warmup.warmup_messages) if warmup else None,
                     "timestamp": report.timestamp.isoformat(),
                     "planned_attempts": warmup.planned_attempts if warmup else report.overall_attempts,
                     "completed_attempts": report.overall_attempts,

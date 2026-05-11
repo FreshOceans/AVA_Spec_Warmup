@@ -56,6 +56,7 @@
                     <h2>AVA Spec Warm Up Performance</h2>
                     <p>
                         {{ warmup.completed_attempts }} of {{ warmup.planned_attempts }} planned attempts completed.
+                        Suite: {{ warmup.suite_name }} / {{ warmup.scenario_name }}.
                         Trigger: {{ warmup.trigger_source }}{% if warmup.schedule_label %} - {{ warmup.schedule_label }}{% endif %}.
                     </p>
                 </div>
@@ -90,6 +91,10 @@
                 <div class="metric">
                     <span class="metric-label">Profile</span>
                     <strong>{{ warmup.performance_profile }}</strong>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">Messages</span>
+                    <strong>{{ (warmup.warmup_messages or [warmup.fixed_message])|length }}</strong>
                 </div>
             </div>
 
@@ -274,7 +279,7 @@
             <div class="section-heading">
                 <div>
                     <h2>Scheduled AVA Spec Warm Ups</h2>
-                    <p>Automatic schedules run the same fixed warm-up flow and write metrics to local history.</p>
+                    <p>Automatic schedules run the saved warm-up suite and write metrics to local history.</p>
                 </div>
                 <form method="POST" action="{{ url_for('disable_model_warmup_schedule') }}">
                     <input type="hidden" name="model_warmup_schedule_redirect" value="results">
@@ -289,6 +294,7 @@
                         <tr>
                             <th>Status</th>
                             <th>Schedule</th>
+                            <th>Suite</th>
                             <th>Next Run UTC</th>
                             <th>Last Status</th>
                         </tr>
@@ -298,6 +304,7 @@
                         <tr>
                             <td><span class="pill">{{ item.status }}</span></td>
                             <td>{{ item.schedule_label or item.cadence }}</td>
+                            <td>{{ ((item.run_request or {}).get('suite_spec') or {}).get('suite_name', 'AVA Spec Warm Up Suite') }}</td>
                             <td>{{ item.next_run_utc or '-' }}</td>
                             <td>{{ (item.last_status or {}).get('status', '-') }}</td>
                         </tr>

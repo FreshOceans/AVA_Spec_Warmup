@@ -14,12 +14,14 @@ from ava_warmup.runner import (
 )
 from ava_warmup.schemas import AppConfig, MessageRole
 from ava_warmup.progress import ProgressEmitter
+from ava_warmup.suites import WarmupSuiteSpec
 
 
 class _FakeWebMessagingClient:
     active_connections = 0
     max_active_connections = 0
     welcome_outcomes = []
+    sent_messages = []
 
     def __init__(self, *args, **kwargs):
         self.raise_timeout = kwargs.get("deployment_id") == "timeout"
@@ -47,6 +49,7 @@ class _FakeWebMessagingClient:
 
     async def send_message(self, text):
         self.sent_message = text
+        type(self).sent_messages.append(text)
         await asyncio.sleep(0)
 
     async def receive_response(self):
@@ -67,6 +70,7 @@ def reset_fake_client():
     _FakeWebMessagingClient.active_connections = 0
     _FakeWebMessagingClient.max_active_connections = 0
     _FakeWebMessagingClient.welcome_outcomes = []
+    _FakeWebMessagingClient.sent_messages = []
 
 
 def _config() -> AppConfig:
@@ -150,6 +154,43 @@ async def test_model_warmup_success_records_conversation_and_compact_timings(mon
     assert report.performance_diagnostics.run_type == "model_warm_up"
     assert report.performance_diagnostics.worker_count == 1
     assert report.performance_diagnostics.slowest_stages
+
+
+@pytest.mark.asyncio
+async def test_model_warmup_custom_suite_dispatches_ordered_messages(monkeypatch):
+    monkeypatch.setattr("ava_warmup.runner.WebMessagingClient", _FakeWebMessagingClient)
+    suite = WarmupSuiteSpec(
+        suite_id="custom",
+        suite_name="Custom Warm Up Suite",
+        scenario_name="Custom Scenario",
+        messages=("hello", "still there?"),
+    )
+    runner = ModelWarmUpRunner(config=_config(), progress_emitter=ProgressEmitter())
+
+    report = await runner.run(
+        ModelWarmUpRunRequest(
+            deployment_id="deploy-id",
+            region="usw2.pure.cloud",
+            execution_mode="serial",
+            worker_count=1,
+            pacing_seconds=1.0,
+            attempt_count=1,
+            suite_spec=suite,
+        )
+    )
+
+    attempt = report.scenario_results[0].attempt_results[0]
+    assert _FakeWebMessagingClient.sent_messages == ["hello", "still there?"]
+    assert report.suite_name == "Custom Warm Up Suite"
+    assert report.scenario_results[0].scenario_name == "Custom Scenario"
+    assert report.model_warmup_run.suite_name == "Custom Warm Up Suite"
+    assert report.model_warmup_run.scenario_name == "Custom Scenario"
+    assert report.model_warmup_run.fixed_message == "hello"
+    assert report.model_warmup_run.warmup_messages == ["hello", "still there?"]
+    assert [message.content for message in attempt.conversation if message.role == MessageRole.USER] == [
+        "hello",
+        "still there?",
+    ]
 
 
 @pytest.mark.asyncio

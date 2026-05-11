@@ -230,6 +230,33 @@ input[readonly] {
     opacity: 0.55;
 }
 
+.suite-detail-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1rem;
+    margin: 0 0 0.75rem;
+}
+
+.suite-detail-list dt {
+    color: var(--muted);
+    font-size: 0.78rem;
+    text-transform: uppercase;
+}
+
+.suite-detail-list dd {
+    margin: 0.15rem 0 0;
+    font-weight: 700;
+}
+
+.suite-message-list {
+    margin: 0;
+    padding-left: 1.25rem;
+}
+
+.suite-message-list li {
+    margin-top: 0.35rem;
+}
+
 .actions {
     display: flex;
     flex-wrap: wrap;

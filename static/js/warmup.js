@@ -37,6 +37,16 @@
         setHidden(byId("schedule-month-day-field"), value !== "monthly");
     }
 
+    function updateSuiteDetails() {
+        var selector = byId("model_warmup_suite_id");
+        if (!selector) {
+            return;
+        }
+        document.querySelectorAll("[data-suite-detail]").forEach(function (detail) {
+            detail.hidden = detail.getAttribute("data-suite-detail") !== selector.value;
+        });
+    }
+
     function initializeDates() {
         var start = byId("model_warmup_schedule_start_date");
         var end = byId("model_warmup_schedule_end_date");
@@ -263,6 +273,12 @@
         if (cadence) {
             cadence.addEventListener("change", updateScheduleFields);
             updateScheduleFields();
+        }
+
+        var suiteSelector = byId("model_warmup_suite_id");
+        if (suiteSelector) {
+            suiteSelector.addEventListener("change", updateSuiteDetails);
+            updateSuiteDetails();
         }
 
         initializeTimezone();
